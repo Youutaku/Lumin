@@ -234,47 +234,90 @@ ipcMain.handle('proxy:set', (event, { enabled, proxyUrl }) => {
   return { enabled: finalEnabled, proxyUrl: url, feedUrl }
 })
 
-// 代理测速：先取 latest.yml，再真实下载安装包前 1MB 计算速度
+// 代理测速：取 latest.yml 验证可达性，再用 net.request 算真实下载速度
 ipcMain.handle('proxy:test', async (event, proxyUrl) => {
   const dir = buildFeedUrl(proxyUrl)
-  const startedAt = Date.now()
+  const overallStart = Date.now()
+
+  // 1) 先验证 latest.yml 可访问
+  let asset = ''
   try {
-    const resp = await net.fetch(`${dir}latest.yml`)
-    if (!resp.ok) {
-      return { ok: false, ms: Date.now() - startedAt, message: `HTTP ${resp.status}` }
-    }
+    const ymlController = new AbortController()
+    const ymlTimer = setTimeout(() => ymlController.abort(), 8000)
+    const resp = await net.fetch(`${dir}latest.yml`, { signal: ymlController.signal })
+    clearTimeout(ymlTimer)
+    if (!resp.ok) return { ok: false, ms: Date.now() - overallStart, message: `HTTP ${resp.status}` }
     const text = await resp.text()
-    if (!text.includes('version')) {
-      return { ok: false, ms: Date.now() - startedAt, message: 'latest.yml 内容异常' }
-    }
-    const metaMs = Date.now() - startedAt
     const m = text.match(/url:\s*([^\r\n]+)/)
-    const asset = m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
-    if (!asset) {
-      return { ok: true, ms: metaMs, speedKbps: 0, feedUrl: dir }
-    }
-    // 只读取约 1MB 就断开，避免测速时下载整个安装包
-    const downloadStartedAt = Date.now()
-    const fileResp = await net.fetch(`${dir}${asset}`, {
-      headers: { Range: 'bytes=0-1048575' }
-    })
-    if (!fileResp.ok && fileResp.status !== 206) {
-      return { ok: false, ms: metaMs, message: `HTTP ${fileResp.status}`, feedUrl: dir }
-    }
-    let received = 0
-    const reader = fileResp.body.getReader()
-    while (received < 1048576) {
-      const { done, value } = await reader.read()
-      if (done) break
-      received += value ? value.length : 0
-    }
-    try { await reader.cancel() } catch {}
-    const seconds = (Date.now() - downloadStartedAt) / 1000
-    const speedKbps = seconds > 0 ? Math.round(received / 1024 / seconds) : 0
-    return { ok: true, ms: metaMs, speedKbps, bytes: received, feedUrl: dir }
+    asset = m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
   } catch (e) {
-    return { ok: false, ms: Date.now() - startedAt, message: e.message || String(e) }
+    return { ok: false, ms: Date.now() - overallStart, message: e.name === 'AbortError' ? '请求超时（8s）' : (e.message || String(e)) }
   }
+
+  if (!asset) {
+    return { ok: true, ms: Date.now() - overallStart, speedKbps: 0 }
+  }
+
+  // 2) 用 net.request 下载前 1MB 计算速度，Promise 带 15s 超时兜底
+  return await new Promise((resolve) => {
+    let bytes = 0
+    let done = false
+    const startedAt = Date.now()
+    const TARGET = 1048576
+    const req = net.request({
+      method: 'GET',
+      url: `${dir}${asset}`,
+      headers: { Range: `bytes=0-${TARGET - 1}` }
+    })
+    const finish = (result) => {
+      if (done) return
+      done = true
+      try { req.destroy() } catch {}
+      resolve(result)
+    }
+
+    // 15s 兜底超时，防止任何事件都不触发时 Promise 永不 resolve
+    setTimeout(() => {
+      if (!done) finish({
+        ok: false,
+        ms: Date.now() - overallStart,
+        speedKbps: 0,
+        message: '测速超时（15s）'
+      })
+    }, 15000)
+
+    req.on('response', (res) => {
+      const okStatus = res.statusCode === 200 || res.statusCode === 206
+      if (!okStatus) {
+        finish({ ok: false, ms: Date.now() - overallStart, speedKbps: 0, message: `HTTP ${res.statusCode}` })
+        return
+      }
+      res.on('data', (chunk) => {
+        bytes += chunk.length
+        if (bytes >= TARGET && !done) finish({
+          ok: true,
+          ms: Date.now() - overallStart,
+          bytes,
+          speedKbps: Math.round(bytes / 1024 / Math.max((Date.now() - startedAt) / 1000, 0.01))
+        })
+      })
+      res.on('end', () => {
+        if (!done) finish({
+          ok: true,
+          ms: Date.now() - overallStart,
+          bytes,
+          speedKbps: bytes > 0 ? Math.round(bytes / 1024 / Math.max((Date.now() - startedAt) / 1000, 0.01)) : 0
+        })
+      })
+      res.on('error', (err) => {
+        if (!done) finish({ ok: false, ms: Date.now() - overallStart, speedKbps: 0, message: err.message || String(err) })
+      })
+    })
+    req.on('error', (err) => {
+      finish({ ok: false, ms: Date.now() - overallStart, speedKbps: 0, message: err.message || String(err) })
+    })
+    req.end()
+  })
 })
 
 ipcMain.handle('shell:openExternal', async (event, url) => {
