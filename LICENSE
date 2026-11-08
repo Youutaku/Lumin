@@ -1,0 +1,78 @@
+Lumin License
+
+Copyright (c) 2026 Youutaku <gt219933@163.com>
+
+Original Project: https://github.com/Youutaku/Lumin
+
+---
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+---
+
+Clause 1 - Attribution
+
+The above copyright notice, this permission notice, and the original project
+link MUST be included in all copies or substantial portions of the Software.
+
+Any distribution of the Software, including modified versions, MUST display
+a prominent attribution linking back to the original repository:
+
+    https://github.com/Youutaku/Lumin
+
+This attribution MUST remain visible in any derived work's documentation,
+about dialog, or equivalent user-facing location.
+
+---
+
+Clause 2 - Non-Commercial Use
+
+The Software may NOT be used for direct commercial revenue generation,
+including but not limited to:
+
+  (a) Selling, licensing, or redistributing the Software or any derivative
+      work as a standalone paid product or service.
+
+  (b) Embedding the Software or any derivative work within a commercial
+      product or service that is sold or licensed to third parties.
+
+  (c) Using the Software as the primary value driver of a paid offering.
+
+The following uses are explicitly permitted without requiring prior written
+consent from the copyright holder:
+
+  (a) Personal, educational, or non-commercial internal use.
+
+  (b) Use within a company or organization for internal development,
+      documentation, or workflow purposes, provided that the Software
+      is not resold or bundled into a revenue-generating offering.
+
+  (c) Forking, modifying, and sharing the Software for free, as long as
+      Clause 1 and this Clause 2 are respected.
+
+For any commercial use not explicitly permitted above, please contact the
+copyright holder at gt219933@163.com to request written consent.
+
+---
+
+Clause 3 - Same License for Derivatives
+
+If you modify the Software and distribute your modified version, your
+derivative work MUST be released under the same license terms as this
+Software. Your derivative work must also retain Clause 1 attribution
+pointing to the original Lumin project.
+
+---
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
