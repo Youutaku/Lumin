@@ -67,6 +67,9 @@ const updater = reactive({
   state: 'idle',     // idle | checking | available | not-available | downloading | downloaded | error
   version: '',
   percent: 0,
+  speed: 0,          // bytes/s
+  transferred: 0,
+  total: 0,
   errorMsg: ''
 })
 
@@ -74,11 +77,20 @@ const updater = reactive({
 const proxy = reactive({
   enabled: false,
   currentUrl: '',
+  feedUrl: '',
   presets: [],
-  selectedPreset: 'https://gh-proxy.com',
-  customUrl: 'https://gh-proxy.com',
-  saving: false
+  selectedPreset: '',
+  customUrl: '',
+  saving: false,
+  testing: false,
+  testText: ''
 })
+
+function formatSpeed(bytesPerSecond) {
+  if (!bytesPerSecond || bytesPerSecond <= 0) return ''
+  if (bytesPerSecond >= 1024 * 1024) return (bytesPerSecond / 1024 / 1024).toFixed(2) + ' MB/s'
+  return Math.round(bytesPerSecond / 1024) + ' KB/s'
+}
 
 async function loadProxyConfig() {
   try {
@@ -86,16 +98,17 @@ async function loadProxyConfig() {
     const cfg = await api.proxyGet()
     proxy.enabled = cfg.enabled
     proxy.currentUrl = cfg.proxyUrl || ''
-    proxy.presets = cfg.presets
+    proxy.feedUrl = cfg.feedUrl || ''
+    proxy.presets = cfg.presets || []
     proxy.selectedPreset = cfg.proxyUrl || ''
-    proxy.customUrl = cfg.proxyUrl || 'https://gh-proxy.com'
+    proxy.customUrl = cfg.proxyUrl || 'https://gh-proxy.org'
   } catch {}
 }
 
 async function onProxyToggle() {
   const api = window.electronAPI
   if (proxy.enabled) {
-    // 打开：用 customUrl（默认 gh-proxy）
+    // 打开：用 customUrl（默认 gh-proxy.org）
     const url = proxy.customUrl.trim()
     if (!url) {
       showToast('请输入代理地址')
@@ -105,13 +118,15 @@ async function onProxyToggle() {
     proxy.saving = true
     const result = await api.proxySet(true, url)
     proxy.currentUrl = result.proxyUrl
+    proxy.feedUrl = result.feedUrl || ''
     proxy.saving = false
     showToast('代理已启用')
   } else {
-    // 关闭
+    // 关闭（保留已填写的代理地址，方便以后重新开启）
     proxy.saving = true
-    const result = await api.proxySet(false, '')
+    const result = await api.proxySet(false, proxy.customUrl.trim())
     proxy.currentUrl = ''
+    proxy.feedUrl = result.feedUrl || ''
     proxy.saving = false
     showToast('已直连 GitHub')
   }
@@ -120,6 +135,7 @@ async function onProxyToggle() {
 function onProxyPresetChange() {
   if (proxy.selectedPreset) {
     proxy.customUrl = proxy.selectedPreset
+    proxy.testText = ''
   }
 }
 
@@ -133,8 +149,27 @@ async function onProxySave() {
   proxy.saving = true
   const result = await api.proxySet(proxy.enabled, url)
   proxy.currentUrl = result.proxyUrl
+  proxy.feedUrl = result.feedUrl || ''
   proxy.saving = false
+  proxy.testText = ''
   showToast('代理已保存')
+}
+
+// 实测当前代理的下载速度（由主进程下载 1MB 真实安装包数据）
+async function testProxy() {
+  const api = window.electronAPI
+  if (!api?.proxyTest || proxy.testing) return
+  const url = proxy.enabled ? proxy.customUrl.trim() : ''
+  proxy.testing = true
+  proxy.testText = '测速中...'
+  const res = await api.proxyTest(url)
+  proxy.testing = false
+  if (res?.ok) {
+    const speed = res.speedKbps > 0 ? ` · 约 ${res.speedKbps} KB/s` : ''
+    proxy.testText = `连通正常 · ${res.ms} ms${speed}`
+  } else {
+    proxy.testText = `连接失败：${res?.message || '未知错误'}`
+  }
 }
 
 function openUrl(url) {
@@ -162,6 +197,7 @@ async function checkUpdate() {
   }
   updater.state = 'checking'
   const res = await api.updaterCheck()
+  if (res?.feedUrl) proxy.feedUrl = res.feedUrl
   if (res && !res.ok && res.message) {
     updater.state = 'error'
     updater.errorMsg = res.message
@@ -194,7 +230,12 @@ function setupUpdaterListeners() {
       case 'updater:not-available':
         updater.state = 'not-available'; break
       case 'updater:progress':
-        updater.state = 'downloading'; updater.percent = data.percent; break
+        updater.state = 'downloading'
+        updater.percent = data.percent
+        updater.speed = data.bytesPerSecond || 0
+        updater.transferred = data.transferred || 0
+        updater.total = data.total || 0
+        break
       case 'updater:downloaded':
         updater.state = 'downloaded'; break
       case 'updater:error':
@@ -688,7 +729,9 @@ onMounted(() => {
             <!-- 进度条 -->
             <div v-if="updater.state === 'downloading'" class="updater-progress">
               <div class="updater-progress-bar" :style="{ width: updater.percent + '%' }"></div>
-              <span class="updater-progress-text">{{ updater.percent }}%</span>
+              <span class="updater-progress-text">
+                {{ updater.percent }}%<template v-if="formatSpeed(updater.speed)"> · {{ formatSpeed(updater.speed) }}</template>
+              </span>
             </div>
 
             <!-- 按钮行 -->
@@ -729,17 +772,23 @@ onMounted(() => {
                   class="proxy-url-input"
                   type="text"
                   v-model="proxy.customUrl"
-                  placeholder="自定义代理前缀，如 https://gh-proxy.com"
+                  placeholder="自定义代理前缀，如 https://gh-proxy.org"
                   @blur="onProxySave"
                 />
-                <button class="btn btn--ghost btn--sm" @click="onProxySave" :disabled="proxy.saving">
-                  {{ proxy.saving ? '保存中...' : '保存' }}
-                </button>
+                <div class="proxy-actions">
+                  <button class="btn btn--ghost btn--sm" @click="onProxySave" :disabled="proxy.saving">
+                    {{ proxy.saving ? '保存中...' : '保存' }}
+                  </button>
+                  <button class="btn btn--ghost btn--sm" @click="testProxy" :disabled="proxy.testing">
+                    {{ proxy.testing ? '测速中...' : '测速' }}
+                  </button>
+                </div>
               </div>
-              <p v-if="proxy.enabled && proxy.currentUrl" class="proxy-hint">
-                当前：{{ proxy.currentUrl }}
+              <p v-if="proxy.enabled && proxy.testText" class="proxy-hint">{{ proxy.testText }}</p>
+              <p v-if="proxy.enabled" class="proxy-hint proxy-feed">
+                当前更新源：{{ proxy.feedUrl }}
               </p>
-              <p v-if="!proxy.enabled" class="proxy-hint">直连 GitHub</p>
+              <p v-if="!proxy.enabled" class="proxy-hint">直连 GitHub（不使用代理）</p>
             </div>
 
             <a class="updater-link" @click="openUrl(GITHUB_RELEASES)">查看全部 Releases ↗</a>
@@ -1137,11 +1186,21 @@ onMounted(() => {
   align-self: flex-start;
 }
 
+.proxy-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .proxy-hint {
   margin: 6px 0 0;
   font-size: 11px;
   color: var(--text-tertiary);
   word-break: break-all;
+}
+
+.proxy-feed {
+  opacity: 0.85;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .about-actions .btn:disabled {

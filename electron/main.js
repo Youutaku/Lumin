@@ -13,6 +13,8 @@ const isDev = process.env.NODE_ENV === 'development'
 // 配置 autoUpdater
 autoUpdater.autoDownload = false  // 用户点"检查更新"才下载
 autoUpdater.autoInstallOnAppQuit = true  // 退出时自动安装
+// 发布时未上传 .blockmap，且部分代理不支持多段 Range，禁用差分下载改为全量下载
+autoUpdater.disableDifferentialDownload = true
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -216,15 +218,63 @@ ipcMain.handle('app:getVersion', () => app.getVersion())
 // 代理相关 IPC
 ipcMain.handle('proxy:get', () => {
   const config = getProxyConfig()
-  return { ...config, presets: DEFAULT_PROXIES }
+  return {
+    enabled: config.enabled,
+    proxyUrl: config.proxyUrl,
+    feedUrl: buildFeedUrl(config.proxyUrl),
+    presets: DEFAULT_PROXIES
+  }
 })
 
-ipcMain.handle('proxy:set', async (event, { enabled, proxyUrl }) => {
-  const url = enabled ? (proxyUrl || '') : ''
-  const finalEnabled = enabled && !!url
+ipcMain.handle('proxy:set', (event, { enabled, proxyUrl }) => {
+  const url = (proxyUrl || '').trim()
+  const finalEnabled = !!enabled && !!url
   writeJson(PROXY_FILE, { enabled: finalEnabled, proxyUrl: url })
-  applyProxy(url)
-  return { enabled: finalEnabled, proxyUrl: url }
+  const feedUrl = applyProxy(finalEnabled ? url : '')
+  return { enabled: finalEnabled, proxyUrl: url, feedUrl }
+})
+
+// 代理测速：先取 latest.yml，再真实下载安装包前 1MB 计算速度
+ipcMain.handle('proxy:test', async (event, proxyUrl) => {
+  const dir = buildFeedUrl(proxyUrl)
+  const startedAt = Date.now()
+  try {
+    const resp = await net.fetch(`${dir}latest.yml`)
+    if (!resp.ok) {
+      return { ok: false, ms: Date.now() - startedAt, message: `HTTP ${resp.status}` }
+    }
+    const text = await resp.text()
+    if (!text.includes('version')) {
+      return { ok: false, ms: Date.now() - startedAt, message: 'latest.yml 内容异常' }
+    }
+    const metaMs = Date.now() - startedAt
+    const m = text.match(/url:\s*([^\r\n]+)/)
+    const asset = m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
+    if (!asset) {
+      return { ok: true, ms: metaMs, speedKbps: 0, feedUrl: dir }
+    }
+    // 只读取约 1MB 就断开，避免测速时下载整个安装包
+    const downloadStartedAt = Date.now()
+    const fileResp = await net.fetch(`${dir}${asset}`, {
+      headers: { Range: 'bytes=0-1048575' }
+    })
+    if (!fileResp.ok && fileResp.status !== 206) {
+      return { ok: false, ms: metaMs, message: `HTTP ${fileResp.status}`, feedUrl: dir }
+    }
+    let received = 0
+    const reader = fileResp.body.getReader()
+    while (received < 1048576) {
+      const { done, value } = await reader.read()
+      if (done) break
+      received += value ? value.length : 0
+    }
+    try { await reader.cancel() } catch {}
+    const seconds = (Date.now() - downloadStartedAt) / 1000
+    const speedKbps = seconds > 0 ? Math.round(received / 1024 / seconds) : 0
+    return { ok: true, ms: metaMs, speedKbps, bytes: received, feedUrl: dir }
+  } catch (e) {
+    return { ok: false, ms: Date.now() - startedAt, message: e.message || String(e) }
+  }
 })
 
 ipcMain.handle('shell:openExternal', async (event, url) => {
@@ -251,12 +301,13 @@ const PROXY_FILE = path.join(CHANGES_DIR, '.updater-proxy.json')
 const GITHUB_BASE = 'https://github.com'
 const GITHUB_API_BASE = 'https://api.github.com'
 
-// 默认代理列表
+// 默认代理（gh-proxy.org 实测比 gh-proxy.com 快 3-5 倍）
+const DEFAULT_PROXY_URL = 'https://gh-proxy.org'
 const DEFAULT_PROXIES = [
+  { label: 'gh-proxy.org（推荐）', url: 'https://gh-proxy.org' },
   { label: 'gh-proxy.com', url: 'https://gh-proxy.com' },
   { label: 'mirror.ghproxy.com', url: 'https://mirror.ghproxy.com' },
-  { label: 'gh.api.99988866.xyz', url: 'https://gh.api.99988866.xyz' },
-  { label: '不使用代理', url: '' }
+  { label: '不使用代理（直连）', url: '' }
 ]
 
 function readJson(file) {
@@ -273,31 +324,48 @@ function writeJson(file, data) {
   } catch {}
 }
 
-// 获取当前代理配置
+// 获取当前代理配置（首次运行默认启用 gh-proxy.org）
 function getProxyConfig() {
   const saved = readJson(PROXY_FILE)
+  if (!saved) {
+    return { enabled: true, proxyUrl: DEFAULT_PROXY_URL }
+  }
   return {
-    enabled: saved?.enabled ?? false,
-    proxyUrl: saved?.proxyUrl ?? ''
+    enabled: !!saved.enabled,
+    proxyUrl: saved.enabled ? (saved.proxyUrl || '') : ''
   }
 }
 
-// 把 URL 套上代理前缀（代理格式：https://gh-proxy.com/https://github.com/xxx）
+// 拼代理前缀（格式：https://gh-proxy.org/https://github.com/xxx）
 function wrapWithProxy(url, proxyUrl) {
   if (!proxyUrl) return url
-  // 去掉代理末尾的斜杠
-  const prefix = proxyUrl.replace(/\/+$/, '')
-  return `${prefix}/${url}`
+  return `${proxyUrl.replace(/\/+$/, '')}/${url}`
 }
 
-// 把 autoUpdater 切到指定代理（或直连）
+function getEffectiveProxyUrl() {
+  const cfg = getProxyConfig()
+  return cfg.enabled ? cfg.proxyUrl : ''
+}
+
+// 发布页的 latest/download 目录：electron-updater 会在该目录下取 latest.yml 和安装包
+function buildFeedUrl(proxyUrl) {
+  const base = `${GITHUB_BASE}/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest/download/`
+  return proxyUrl ? wrapWithProxy(base, proxyUrl) : base
+}
+
+let currentFeedUrl = ''
+
+// 把更新源切到「代理 + GitHub Release」或「直连」
 function applyProxy(proxyUrl) {
-  const releasesBase = `${GITHUB_BASE}/${GITHUB_OWNER}/${GITHUB_REPO}/releases`
-  const latestDir = `${releasesBase}/latest/download`
-  autoUpdater.server = {
-    provider: 'generic',
-    url: proxyUrl ? wrapWithProxy(latestDir, proxyUrl) : latestDir
+  const feedUrl = buildFeedUrl(proxyUrl)
+  if (feedUrl === currentFeedUrl) return feedUrl
+  try {
+    autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl })
+    currentFeedUrl = feedUrl
+  } catch (e) {
+    console.error('[updater] setFeedURL 失败:', e.message)
   }
+  return feedUrl
 }
 
 async function checkVersionChange() {
@@ -320,20 +388,21 @@ async function checkVersionChange() {
   writeJson(LAST_VERSION_FILE, { version: current, at: Date.now() })
 }
 
-// 从 GitHub Releases API 拉 release notes
+// 从 GitHub Releases API 拉 release notes（走代理，失败回退直连）
 async function fetchGithubReleaseNotes(tag) {
-  try {
-    const { proxyUrl } = getProxyConfig()
-    const url = `${GITHUB_API_BASE}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${tag}`
-    // API 走代理用 gh-proxy 的 API 模式
-    const apiUrl = proxyUrl ? wrapWithProxy(url, proxyUrl) : url
-    const resp = await net.fetch(apiUrl)
-    if (!resp.ok) return ''
-    const data = await resp.json()
-    return data.body || ''
-  } catch {
-    return ''
+  const apiUrl = `${GITHUB_API_BASE}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${tag}`
+  const proxyUrl = getEffectiveProxyUrl()
+  const candidates = proxyUrl ? [wrapWithProxy(apiUrl, proxyUrl), apiUrl] : [apiUrl]
+  for (const url of candidates) {
+    try {
+      const resp = await net.fetch(url)
+      if (resp.ok) {
+        const data = await resp.json()
+        if (data.body) return data.body
+      }
+    } catch {}
   }
+  return ''
 }
 
 autoUpdater.on('checking-for-update', () => {
@@ -395,8 +464,10 @@ ipcMain.handle('updater:check', async () => {
     return { ok: false, message: '开发模式下无法检查更新，请使用打包后的版本。' }
   }
   try {
+    // 每次检查前按当前设置刷新更新源，保证代理改动立即生效
+    const feedUrl = applyProxy(getEffectiveProxyUrl())
     await autoUpdater.checkForUpdates()
-    return { ok: true }
+    return { ok: true, feedUrl }
   } catch (e) {
     return { ok: false, message: e.message || String(e) }
   }
@@ -422,11 +493,8 @@ app.whenReady().then(() => {
   createWindow()
   createMenu()
 
-  // 初始化代理配置
-  const { enabled, proxyUrl } = getProxyConfig()
-  if (enabled && proxyUrl) {
-    applyProxy(proxyUrl)
-  }
+  // 初始化更新源（启用代理则走代理，否则直连）
+  applyProxy(getEffectiveProxyUrl())
 
   // 生产环境启动后静默检查一次更新
   if (!isDev) {

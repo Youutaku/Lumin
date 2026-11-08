@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ============ GitHub 代理 ============
   proxyGet: () => ipcRenderer.invoke('proxy:get'),
   proxySet: (enabled, proxyUrl) => ipcRenderer.invoke('proxy:set', { enabled, proxyUrl }),
+  proxyTest: (proxyUrl) => ipcRenderer.invoke('proxy:test', proxyUrl),
 
   // ============ Auto Updater ============
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
