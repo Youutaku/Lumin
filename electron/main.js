@@ -213,6 +213,20 @@ ipcMain.handle('file:write', async (event, { filePath, content }) => {
 
 ipcMain.handle('app:getVersion', () => app.getVersion())
 
+// 代理相关 IPC
+ipcMain.handle('proxy:get', () => {
+  const config = getProxyConfig()
+  return { ...config, presets: DEFAULT_PROXIES }
+})
+
+ipcMain.handle('proxy:set', async (event, { enabled, proxyUrl }) => {
+  const url = enabled ? (proxyUrl || '') : ''
+  const finalEnabled = enabled && !!url
+  writeJson(PROXY_FILE, { enabled: finalEnabled, proxyUrl: url })
+  applyProxy(url)
+  return { enabled: finalEnabled, proxyUrl: url }
+})
+
 ipcMain.handle('shell:openExternal', async (event, url) => {
   try {
     await shell.openExternal(url)
@@ -233,6 +247,17 @@ function sendToRenderer(channel, data) {
 const CHANGES_DIR = app.getPath('userData')
 const LAST_VERSION_FILE = path.join(CHANGES_DIR, '.last-version.json')
 const CHANGELOG_FILE = path.join(CHANGES_DIR, '.changelog.json')
+const PROXY_FILE = path.join(CHANGES_DIR, '.updater-proxy.json')
+const GITHUB_BASE = 'https://github.com'
+const GITHUB_API_BASE = 'https://api.github.com'
+
+// 默认代理列表
+const DEFAULT_PROXIES = [
+  { label: 'gh-proxy.com', url: 'https://gh-proxy.com' },
+  { label: 'mirror.ghproxy.com', url: 'https://mirror.ghproxy.com' },
+  { label: 'gh.api.99988866.xyz', url: 'https://gh.api.99988866.xyz' },
+  { label: '不使用代理', url: '' }
+]
 
 function readJson(file) {
   try {
@@ -246,6 +271,33 @@ function writeJson(file, data) {
   try {
     fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8')
   } catch {}
+}
+
+// 获取当前代理配置
+function getProxyConfig() {
+  const saved = readJson(PROXY_FILE)
+  return {
+    enabled: saved?.enabled ?? false,
+    proxyUrl: saved?.proxyUrl ?? ''
+  }
+}
+
+// 把 URL 套上代理前缀（代理格式：https://gh-proxy.com/https://github.com/xxx）
+function wrapWithProxy(url, proxyUrl) {
+  if (!proxyUrl) return url
+  // 去掉代理末尾的斜杠
+  const prefix = proxyUrl.replace(/\/+$/, '')
+  return `${prefix}/${url}`
+}
+
+// 把 autoUpdater 切到指定代理（或直连）
+function applyProxy(proxyUrl) {
+  const releasesBase = `${GITHUB_BASE}/${GITHUB_OWNER}/${GITHUB_REPO}/releases`
+  const latestDir = `${releasesBase}/latest/download`
+  autoUpdater.server = {
+    provider: 'generic',
+    url: proxyUrl ? wrapWithProxy(latestDir, proxyUrl) : latestDir
+  }
 }
 
 async function checkVersionChange() {
@@ -271,8 +323,11 @@ async function checkVersionChange() {
 // 从 GitHub Releases API 拉 release notes
 async function fetchGithubReleaseNotes(tag) {
   try {
-    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${tag}`
-    const resp = await net.fetch(url)
+    const { proxyUrl } = getProxyConfig()
+    const url = `${GITHUB_API_BASE}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${tag}`
+    // API 走代理用 gh-proxy 的 API 模式
+    const apiUrl = proxyUrl ? wrapWithProxy(url, proxyUrl) : url
+    const resp = await net.fetch(apiUrl)
     if (!resp.ok) return ''
     const data = await resp.json()
     return data.body || ''
@@ -366,6 +421,12 @@ ipcMain.handle('updater:install', async () => {
 app.whenReady().then(() => {
   createWindow()
   createMenu()
+
+  // 初始化代理配置
+  const { enabled, proxyUrl } = getProxyConfig()
+  if (enabled && proxyUrl) {
+    applyProxy(proxyUrl)
+  }
 
   // 生产环境启动后静默检查一次更新
   if (!isDev) {

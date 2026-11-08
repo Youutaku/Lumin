@@ -1,6 +1,6 @@
 {
   "name": "lumin",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Lumin - A focused, elegant Markdown editor",
   "main": "electron/main.js",
   "author": "Lumin Team",

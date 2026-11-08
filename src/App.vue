@@ -70,6 +70,73 @@ const updater = reactive({
   errorMsg: ''
 })
 
+// 代理配置
+const proxy = reactive({
+  enabled: false,
+  currentUrl: '',
+  presets: [],
+  selectedPreset: 'https://gh-proxy.com',
+  customUrl: 'https://gh-proxy.com',
+  saving: false
+})
+
+async function loadProxyConfig() {
+  try {
+    const api = window.electronAPI
+    const cfg = await api.proxyGet()
+    proxy.enabled = cfg.enabled
+    proxy.currentUrl = cfg.proxyUrl || ''
+    proxy.presets = cfg.presets
+    proxy.selectedPreset = cfg.proxyUrl || ''
+    proxy.customUrl = cfg.proxyUrl || 'https://gh-proxy.com'
+  } catch {}
+}
+
+async function onProxyToggle() {
+  const api = window.electronAPI
+  if (proxy.enabled) {
+    // 打开：用 customUrl（默认 gh-proxy）
+    const url = proxy.customUrl.trim()
+    if (!url) {
+      showToast('请输入代理地址')
+      proxy.enabled = false
+      return
+    }
+    proxy.saving = true
+    const result = await api.proxySet(true, url)
+    proxy.currentUrl = result.proxyUrl
+    proxy.saving = false
+    showToast('代理已启用')
+  } else {
+    // 关闭
+    proxy.saving = true
+    const result = await api.proxySet(false, '')
+    proxy.currentUrl = ''
+    proxy.saving = false
+    showToast('已直连 GitHub')
+  }
+}
+
+function onProxyPresetChange() {
+  if (proxy.selectedPreset) {
+    proxy.customUrl = proxy.selectedPreset
+  }
+}
+
+async function onProxySave() {
+  const api = window.electronAPI
+  const url = proxy.customUrl.trim()
+  if (!url) {
+    showToast('代理地址不能为空')
+    return
+  }
+  proxy.saving = true
+  const result = await api.proxySet(proxy.enabled, url)
+  proxy.currentUrl = result.proxyUrl
+  proxy.saving = false
+  showToast('代理已保存')
+}
+
 function openUrl(url) {
   const api = window.electronAPI
   if (api?.openExternal) {
@@ -321,6 +388,11 @@ watch(
     autosave()
   }
 )
+
+// About 弹窗打开时加载代理配置
+watch(showAbout, (v) => {
+  if (v) loadProxyConfig()
+})
 
 // ---- Actions ----
 async function handleNew() {
@@ -638,6 +710,38 @@ onMounted(() => {
               <button class="btn btn--ghost" @click="showAbout = false">关闭</button>
             </div>
 
+            <!-- GitHub 代理设置 -->
+            <div class="proxy-block">
+              <div class="proxy-toggle-row">
+                <span class="proxy-label">GitHub 代理</span>
+                <label class="switch">
+                  <input type="checkbox" v-model="proxy.enabled" @change="onProxyToggle" />
+                  <span class="switch-slider"></span>
+                </label>
+              </div>
+              <div v-if="proxy.enabled" class="proxy-config">
+                <select class="proxy-preset" v-model="proxy.selectedPreset" @change="onProxyPresetChange">
+                  <option v-for="p in proxy.presets" :key="p.url" :value="p.url">
+                    {{ p.label }}
+                  </option>
+                </select>
+                <input
+                  class="proxy-url-input"
+                  type="text"
+                  v-model="proxy.customUrl"
+                  placeholder="自定义代理前缀，如 https://gh-proxy.com"
+                  @blur="onProxySave"
+                />
+                <button class="btn btn--ghost btn--sm" @click="onProxySave" :disabled="proxy.saving">
+                  {{ proxy.saving ? '保存中...' : '保存' }}
+                </button>
+              </div>
+              <p v-if="proxy.enabled && proxy.currentUrl" class="proxy-hint">
+                当前：{{ proxy.currentUrl }}
+              </p>
+              <p v-if="!proxy.enabled" class="proxy-hint">直连 GitHub</p>
+            </div>
+
             <a class="updater-link" @click="openUrl(GITHUB_RELEASES)">查看全部 Releases ↗</a>
           </div>
 
@@ -928,6 +1032,116 @@ onMounted(() => {
 }
 .updater-link:hover {
   color: var(--accent);
+}
+
+/* ============ GitHub 代理设置 ============ */
+.proxy-block {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-inset);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.proxy-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.proxy-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* Switch 开关 */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--bg-hover);
+  border-radius: 22px;
+  transition: background 200ms;
+}
+.switch-slider::before {
+  content: '';
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 2px;
+  bottom: 2px;
+  background: var(--text-tertiary);
+  border-radius: 50%;
+  transition: transform 200ms, background 200ms;
+}
+.switch input:checked + .switch-slider {
+  background: var(--accent);
+}
+.switch input:checked + .switch-slider::before {
+  transform: translateX(18px);
+  background: #fff;
+}
+
+.proxy-config {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.proxy-preset {
+  padding: 6px 8px;
+  font-size: 12px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+}
+.proxy-preset:focus {
+  border-color: var(--accent);
+}
+
+.proxy-url-input {
+  padding: 7px 10px;
+  font-size: 12px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  font-family: inherit;
+}
+.proxy-url-input:focus {
+  border-color: var(--accent);
+}
+
+.btn--sm {
+  padding: 4px 12px;
+  font-size: 12px;
+  height: auto;
+  align-self: flex-start;
+}
+
+.proxy-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-all;
 }
 
 .about-actions .btn:disabled {
