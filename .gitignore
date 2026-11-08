@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+release-v2/
+release-v3/
+release-v4/
+release-v5/
+*.log
+.DS_Store
+Thumbs.db
+.cache/
+.temp/
+scripts/build/
